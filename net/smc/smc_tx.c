@@ -15,6 +15,8 @@
 #include <linux/net.h>
 #include <linux/rcupdate.h>
 #include <linux/workqueue.h>
+#include <linux/sched/signal.h>
+
 #include <net/sock.h>
 
 #include "smc.h"
@@ -429,9 +431,13 @@ static void smc_tx_work(struct work_struct *work)
 						   struct smc_connection,
 						   tx_work);
 	struct smc_sock *smc = container_of(conn, struct smc_sock, conn);
+	int rc;
 
 	lock_sock(&smc->sk);
-	smc_tx_sndbuf_nonempty(conn);
+	rc = smc_tx_sndbuf_nonempty(conn);
+	if (!rc && conn->local_rx_ctrl.prod_flags.write_blocked &&
+	    !atomic_read(&conn->bytes_to_rcv))
+		conn->local_rx_ctrl.prod_flags.write_blocked = 0;
 	release_sock(&smc->sk);
 }
 

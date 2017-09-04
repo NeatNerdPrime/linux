@@ -425,7 +425,7 @@ static int megasas_create_sg_sense_fusion(struct megasas_instance *instance)
 int
 megasas_alloc_cmdlist_fusion(struct megasas_instance *instance)
 {
-	u32 max_mpt_cmd, i;
+	u32 max_mpt_cmd, i, j;
 	struct fusion_context *fusion;
 
 	fusion = instance->ctrl_context;
@@ -450,11 +450,15 @@ megasas_alloc_cmdlist_fusion(struct megasas_instance *instance)
 		fusion->cmd_list[i] = kzalloc(sizeof(struct megasas_cmd_fusion),
 					      GFP_KERNEL);
 		if (!fusion->cmd_list[i]) {
+			for (j = 0; j < i; j++)
+				kfree(fusion->cmd_list[j]);
+			kfree(fusion->cmd_list);
 			dev_err(&instance->pdev->dev,
 				"Failed from %s %d\n",  __func__, __LINE__);
 			return -ENOMEM;
 		}
 	}
+
 	return 0;
 }
 int
@@ -2159,7 +2163,7 @@ megasas_set_raidflag_cpu_affinity(union RAID_CONTEXT_UNION *praid_context,
 				cpu_sel = MR_RAID_CTX_CPUSEL_1;
 
 			if (is_stream_detected(rctx_g35) &&
-			    (raid->level == 5) &&
+			    ((raid->level == 5) || (raid->level == 6)) &&
 			    (raid->writeMode == MR_RL_WRITE_THROUGH_MODE) &&
 			    (cpu_sel == MR_RAID_CTX_CPUSEL_FCFS))
 				cpu_sel = MR_RAID_CTX_CPUSEL_0;
@@ -2338,7 +2342,7 @@ megasas_build_ldio_fusion(struct megasas_instance *instance,
 				fp_possible = false;
 				atomic_dec(&instance->fw_outstanding);
 			} else if ((scsi_buff_len > MR_LARGE_IO_MIN_SIZE) ||
-				   atomic_dec_if_positive(&mrdev_priv->r1_ldio_hint)) {
+				   (atomic_dec_if_positive(&mrdev_priv->r1_ldio_hint) > 0)) {
 				fp_possible = false;
 				atomic_dec(&instance->fw_outstanding);
 				if (scsi_buff_len > MR_LARGE_IO_MIN_SIZE)

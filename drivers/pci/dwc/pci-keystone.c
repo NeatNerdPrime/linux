@@ -291,7 +291,7 @@ static void __init ks_pcie_host_init(struct pcie_port *pp)
 			"Asynchronous external abort");
 }
 
-static struct dw_pcie_host_ops keystone_pcie_host_ops = {
+static const struct dw_pcie_host_ops keystone_pcie_host_ops = {
 	.rd_other_conf = ks_dw_pcie_rd_other_conf,
 	.wr_other_conf = ks_dw_pcie_wr_other_conf,
 	.host_init = ks_pcie_host_init,
@@ -400,6 +400,8 @@ static int __init ks_pcie_probe(struct platform_device *pdev)
 
 	pci->dev = dev;
 	pci->ops = &dw_pcie_ops;
+
+	ks_pcie->pci = pci;
 
 	/* initialize SerDes Phy if present */
 	phy = devm_phy_get(dev, "pcie-phy");

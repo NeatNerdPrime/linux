@@ -448,10 +448,9 @@ static inline int sctp_frag_point(const struct sctp_association *asoc, int pmtu)
 	return frag;
 }
 
-static inline void sctp_assoc_pending_pmtu(struct sock *sk, struct sctp_association *asoc)
+static inline void sctp_assoc_pending_pmtu(struct sctp_association *asoc)
 {
-
-	sctp_assoc_sync_pmtu(sk, asoc);
+	sctp_assoc_sync_pmtu(asoc);
 	asoc->pmtu_pending = 0;
 }
 
@@ -470,8 +469,10 @@ _sctp_walk_params((pos), (chunk), ntohs((chunk)->chunk_hdr.length), member)
 
 #define _sctp_walk_params(pos, chunk, end, member)\
 for (pos.v = chunk->member;\
+     (pos.v + offsetof(struct sctp_paramhdr, length) + sizeof(pos.p->length) <=\
+      (void *)chunk + end) &&\
      pos.v <= (void *)chunk + end - ntohs(pos.p->length) &&\
-     ntohs(pos.p->length) >= sizeof(sctp_paramhdr_t);\
+     ntohs(pos.p->length) >= sizeof(struct sctp_paramhdr);\
      pos.v += SCTP_PAD4(ntohs(pos.p->length)))
 
 #define sctp_walk_errors(err, chunk_hdr)\
@@ -479,7 +480,9 @@ _sctp_walk_errors((err), (chunk_hdr), ntohs((chunk_hdr)->length))
 
 #define _sctp_walk_errors(err, chunk_hdr, end)\
 for (err = (sctp_errhdr_t *)((void *)chunk_hdr + \
-	    sizeof(sctp_chunkhdr_t));\
+	    sizeof(struct sctp_chunkhdr));\
+     ((void *)err + offsetof(sctp_errhdr_t, length) + sizeof(err->length) <=\
+      (void *)chunk_hdr + end) &&\
      (void *)err <= (void *)chunk_hdr + end - ntohs(err->length) &&\
      ntohs(err->length) >= sizeof(sctp_errhdr_t); \
      err = (sctp_errhdr_t *)((void *)err + SCTP_PAD4(ntohs(err->length))))
@@ -596,12 +599,23 @@ static inline void sctp_v4_map_v6(union sctp_addr *addr)
  */
 static inline struct dst_entry *sctp_transport_dst_check(struct sctp_transport *t)
 {
-	if (t->dst && (!dst_check(t->dst, t->dst_cookie) ||
-		       t->pathmtu != max_t(size_t, SCTP_TRUNC4(dst_mtu(t->dst)),
-					   SCTP_DEFAULT_MINSEGMENT)))
+	if (t->dst && !dst_check(t->dst, t->dst_cookie))
 		sctp_transport_dst_release(t);
 
 	return t->dst;
+}
+
+static inline bool sctp_transport_pmtu_check(struct sctp_transport *t)
+{
+	__u32 pmtu = max_t(size_t, SCTP_TRUNC4(dst_mtu(t->dst)),
+			   SCTP_DEFAULT_MINSEGMENT);
+
+	if (t->pathmtu == pmtu)
+		return true;
+
+	t->pathmtu = pmtu;
+
+	return false;
 }
 
 #endif /* __net_sctp_h__ */

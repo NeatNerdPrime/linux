@@ -294,6 +294,10 @@ MODULE_PARM_DESC(aif_timeout, "The duration of time in seconds to wait for"
 	"deregistering them. This is typically adjusted for heavily burdened"
 	" systems.");
 
+int aac_fib_dump;
+module_param(aac_fib_dump, int, 0644);
+MODULE_PARM_DESC(aac_fib_dump, "Dump controller fibs prior to IOP_RESET 0=off, 1=on");
+
 int numacb = -1;
 module_param(numacb, int, S_IRUGO|S_IWUSR);
 MODULE_PARM_DESC(numacb, "Request a limit to the number of adapter control"
@@ -311,7 +315,7 @@ module_param(update_interval, int, S_IRUGO|S_IWUSR);
 MODULE_PARM_DESC(update_interval, "Interval in seconds between time sync"
 	" updates issued to adapter.");
 
-int check_interval = 24 * 60 * 60;
+int check_interval = 60;
 module_param(check_interval, int, S_IRUGO|S_IWUSR);
 MODULE_PARM_DESC(check_interval, "Interval in seconds between adapter health"
 	" checks.");
@@ -483,7 +487,7 @@ int aac_get_containers(struct aac_dev *dev)
 	if (status >= 0) {
 		dresp = (struct aac_get_container_count_resp *)fib_data(fibptr);
 		maximum_num_containers = le32_to_cpu(dresp->ContainerSwitchEntries);
-		if (fibptr->dev->supplement_adapter_info.SupportedOptions2 &
+		if (fibptr->dev->supplement_adapter_info.supported_options2 &
 		    AAC_OPTION_SUPPORTED_240_VOLUMES) {
 			maximum_num_containers =
 				le32_to_cpu(dresp->MaxSimpleVolumes);
@@ -545,7 +549,9 @@ static void get_container_name_callback(void *context, struct fib * fibptr)
 	if ((le32_to_cpu(get_name_reply->status) == CT_OK)
 	 && (get_name_reply->data[0] != '\0')) {
 		char *sp = get_name_reply->data;
-		sp[sizeof(((struct aac_get_name_resp *)NULL)->data)] = '\0';
+		int data_size = FIELD_SIZEOF(struct aac_get_name_resp, data);
+
+		sp[data_size - 1] = '\0';
 		while (*sp == ' ')
 			++sp;
 		if (*sp) {
@@ -575,11 +581,14 @@ static void get_container_name_callback(void *context, struct fib * fibptr)
 static int aac_get_container_name(struct scsi_cmnd * scsicmd)
 {
 	int status;
+	int data_size;
 	struct aac_get_name *dinfo;
 	struct fib * cmd_fibcontext;
 	struct aac_dev * dev;
 
 	dev = (struct aac_dev *)scsicmd->device->host->hostdata;
+
+	data_size = FIELD_SIZEOF(struct aac_get_name_resp, data);
 
 	cmd_fibcontext = aac_fib_alloc_tag(dev, scsicmd);
 
@@ -589,7 +598,7 @@ static int aac_get_container_name(struct scsi_cmnd * scsicmd)
 	dinfo->command = cpu_to_le32(VM_ContainerConfig);
 	dinfo->type = cpu_to_le32(CT_READ_NAME);
 	dinfo->cid = cpu_to_le32(scmd_id(scsicmd));
-	dinfo->count = cpu_to_le32(sizeof(((struct aac_get_name_resp *)NULL)->data));
+	dinfo->count = cpu_to_le32(data_size - 1);
 
 	status = aac_fib_send(ContainerCommand,
 		  cmd_fibcontext,
@@ -639,13 +648,16 @@ static void _aac_probe_container2(void * context, struct fib * fibptr)
 	fsa_dev_ptr = fibptr->dev->fsa_dev;
 	if (fsa_dev_ptr) {
 		struct aac_mount * dresp = (struct aac_mount *) fib_data(fibptr);
+		__le32 sup_options2;
+
 		fsa_dev_ptr += scmd_id(scsicmd);
+		sup_options2 =
+			fibptr->dev->supplement_adapter_info.supported_options2;
 
 		if ((le32_to_cpu(dresp->status) == ST_OK) &&
 		    (le32_to_cpu(dresp->mnt[0].vol) != CT_NONE) &&
 		    (le32_to_cpu(dresp->mnt[0].state) != FSCS_HIDDEN)) {
-			if (!(fibptr->dev->supplement_adapter_info.SupportedOptions2 &
-			    AAC_OPTION_VARIABLE_BLOCK_SIZE)) {
+			if (!(sup_options2 & AAC_OPTION_VARIABLE_BLOCK_SIZE)) {
 				dresp->mnt[0].fileinfo.bdevinfo.block_size = 0x200;
 				fsa_dev_ptr->block_size = 0x200;
 			} else {
@@ -688,7 +700,7 @@ static void _aac_probe_container1(void * context, struct fib * fibptr)
 	int status;
 
 	dresp = (struct aac_mount *) fib_data(fibptr);
-	if (!(fibptr->dev->supplement_adapter_info.SupportedOptions2 &
+	if (!(fibptr->dev->supplement_adapter_info.supported_options2 &
 	    AAC_OPTION_VARIABLE_BLOCK_SIZE))
 		dresp->mnt[0].capacityhigh = 0;
 	if ((le32_to_cpu(dresp->status) != ST_OK) ||
@@ -705,7 +717,7 @@ static void _aac_probe_container1(void * context, struct fib * fibptr)
 
 	dinfo = (struct aac_query_mount *)fib_data(fibptr);
 
-	if (fibptr->dev->supplement_adapter_info.SupportedOptions2 &
+	if (fibptr->dev->supplement_adapter_info.supported_options2 &
 	    AAC_OPTION_VARIABLE_BLOCK_SIZE)
 		dinfo->command = cpu_to_le32(VM_NameServeAllBlk);
 	else
@@ -745,7 +757,7 @@ static int _aac_probe_container(struct scsi_cmnd * scsicmd, int (*callback)(stru
 
 		dinfo = (struct aac_query_mount *)fib_data(fibptr);
 
-		if (fibptr->dev->supplement_adapter_info.SupportedOptions2 &
+		if (fibptr->dev->supplement_adapter_info.supported_options2 &
 		    AAC_OPTION_VARIABLE_BLOCK_SIZE)
 			dinfo->command = cpu_to_le32(VM_NameServeAllBlk);
 		else
@@ -896,12 +908,14 @@ char * get_container_type(unsigned tindex)
 static void setinqstr(struct aac_dev *dev, void *data, int tindex)
 {
 	struct scsi_inq *str;
+	struct aac_supplement_adapter_info *sup_adap_info;
 
+	sup_adap_info = &dev->supplement_adapter_info;
 	str = (struct scsi_inq *)(data); /* cast data to scsi inq block */
 	memset(str, ' ', sizeof(*str));
 
-	if (dev->supplement_adapter_info.AdapterTypeText[0]) {
-		char * cp = dev->supplement_adapter_info.AdapterTypeText;
+	if (sup_adap_info->adapter_type_text[0]) {
+		char *cp = sup_adap_info->adapter_type_text;
 		int c;
 		if ((cp[0] == 'A') && (cp[1] == 'O') && (cp[2] == 'C'))
 			inqstrcpy("SMC", str->vid);
@@ -911,8 +925,7 @@ static void setinqstr(struct aac_dev *dev, void *data, int tindex)
 				++cp;
 			c = *cp;
 			*cp = '\0';
-			inqstrcpy (dev->supplement_adapter_info.AdapterTypeText,
-				   str->vid);
+			inqstrcpy(sup_adap_info->adapter_type_text, str->vid);
 			*cp = c;
 			while (*cp && *cp != ' ')
 				++cp;
@@ -1670,13 +1683,13 @@ int aac_issue_bmic_identify(struct aac_dev *dev, u32 bus, u32 target)
 			sizeof(struct sgentry) + sizeof(struct sgentry64);
 	datasize = sizeof(struct aac_ciss_identify_pd);
 
-	identify_resp =  pci_alloc_consistent(dev->pdev, datasize, &addr);
-
+	identify_resp = dma_alloc_coherent(&dev->pdev->dev, datasize, &addr,
+					   GFP_KERNEL);
 	if (!identify_resp)
 		goto fib_free_ptr;
 
-	vbus = (u32)le16_to_cpu(dev->supplement_adapter_info.VirtDeviceBus);
-	vid = (u32)le16_to_cpu(dev->supplement_adapter_info.VirtDeviceTarget);
+	vbus = (u32)le16_to_cpu(dev->supplement_adapter_info.virt_device_bus);
+	vid = (u32)le16_to_cpu(dev->supplement_adapter_info.virt_device_target);
 
 	aac_fib_init(fibptr);
 
@@ -1712,7 +1725,7 @@ int aac_issue_bmic_identify(struct aac_dev *dev, u32 bus, u32 target)
 		dev->hba_map[bus][target].qd_limit =
 			identify_resp->current_queue_depth_limit;
 
-	pci_free_consistent(dev->pdev, datasize, (void *)identify_resp, addr);
+	dma_free_coherent(&dev->pdev->dev, datasize, identify_resp, addr);
 
 	aac_fib_complete(fibptr);
 
@@ -1806,18 +1819,17 @@ int aac_report_phys_luns(struct aac_dev *dev, struct fib *fibptr, int rescan)
 	datasize = sizeof(struct aac_ciss_phys_luns_resp)
 			+ (AAC_MAX_TARGETS - 1) * sizeof(struct _ciss_lun);
 
-	phys_luns = (struct aac_ciss_phys_luns_resp *) pci_alloc_consistent(
-			dev->pdev, datasize, &addr);
-
+	phys_luns = dma_alloc_coherent(&dev->pdev->dev, datasize, &addr,
+				       GFP_KERNEL);
 	if (phys_luns == NULL) {
 		rcode = -ENOMEM;
 		goto err_out;
 	}
 
 	vbus = (u32) le16_to_cpu(
-			dev->supplement_adapter_info.VirtDeviceBus);
+			dev->supplement_adapter_info.virt_device_bus);
 	vid = (u32) le16_to_cpu(
-			dev->supplement_adapter_info.VirtDeviceTarget);
+			dev->supplement_adapter_info.virt_device_target);
 
 	aac_fib_init(fibptr);
 
@@ -1853,7 +1865,7 @@ int aac_report_phys_luns(struct aac_dev *dev, struct fib *fibptr, int rescan)
 		aac_update_hba_map(dev, phys_luns, rescan);
 	}
 
-	pci_free_consistent(dev->pdev, datasize, (void *) phys_luns, addr);
+	dma_free_coherent(&dev->pdev->dev, datasize, phys_luns, addr);
 err_out:
 	return rcode;
 }
@@ -1893,7 +1905,7 @@ int aac_get_adapter_info(struct aac_dev* dev)
 	}
 	memcpy(&dev->adapter_info, info, sizeof(*info));
 
-	dev->supplement_adapter_info.VirtDeviceBus = 0xffff;
+	dev->supplement_adapter_info.virt_device_bus = 0xffff;
 	if (dev->adapter_info.options & AAC_OPT_SUPPLEMENT_ADAPTER_INFO) {
 		struct aac_supplement_adapter_info * sinfo;
 
@@ -1961,7 +1973,7 @@ int aac_get_adapter_info(struct aac_dev* dev)
 	}
 
 	if (!dev->sync_mode && dev->sa_firmware &&
-			dev->supplement_adapter_info.VirtDeviceBus != 0xffff) {
+		dev->supplement_adapter_info.virt_device_bus != 0xffff) {
 		/* Thor SA Firmware -> CISS_REPORT_PHYSICAL_LUNS */
 		rcode = aac_report_phys_luns(dev, fibptr, AAC_INIT);
 	}
@@ -1976,8 +1988,8 @@ int aac_get_adapter_info(struct aac_dev* dev)
 			(tmp>>16)&0xff,
 			tmp&0xff,
 			le32_to_cpu(dev->adapter_info.kernelbuild),
-			(int)sizeof(dev->supplement_adapter_info.BuildDate),
-			dev->supplement_adapter_info.BuildDate);
+			(int)sizeof(dev->supplement_adapter_info.build_date),
+			dev->supplement_adapter_info.build_date);
 		tmp = le32_to_cpu(dev->adapter_info.monitorrev);
 		printk(KERN_INFO "%s%d: monitor %d.%d-%d[%d]\n",
 			dev->name, dev->id,
@@ -1993,14 +2005,15 @@ int aac_get_adapter_info(struct aac_dev* dev)
 		  shost_to_class(dev->scsi_host_ptr), buffer))
 			printk(KERN_INFO "%s%d: serial %s",
 			  dev->name, dev->id, buffer);
-		if (dev->supplement_adapter_info.VpdInfo.Tsid[0]) {
+		if (dev->supplement_adapter_info.vpd_info.tsid[0]) {
 			printk(KERN_INFO "%s%d: TSID %.*s\n",
 			  dev->name, dev->id,
-			  (int)sizeof(dev->supplement_adapter_info.VpdInfo.Tsid),
-			  dev->supplement_adapter_info.VpdInfo.Tsid);
+			  (int)sizeof(dev->supplement_adapter_info
+							.vpd_info.tsid),
+				dev->supplement_adapter_info.vpd_info.tsid);
 		}
 		if (!aac_check_reset || ((aac_check_reset == 1) &&
-		  (dev->supplement_adapter_info.SupportedOptions2 &
+		  (dev->supplement_adapter_info.supported_options2 &
 		  AAC_OPTION_IGNORE_RESET))) {
 			printk(KERN_INFO "%s%d: Reset Adapter Ignored\n",
 			  dev->name, dev->id);
@@ -2008,7 +2021,7 @@ int aac_get_adapter_info(struct aac_dev* dev)
 	}
 
 	dev->cache_protected = 0;
-	dev->jbod = ((dev->supplement_adapter_info.FeatureBits &
+	dev->jbod = ((dev->supplement_adapter_info.feature_bits &
 		AAC_FEATURE_JBOD) != 0);
 	dev->nondasd_support = 0;
 	dev->raid_scsi_mode = 0;
@@ -2063,20 +2076,15 @@ int aac_get_adapter_info(struct aac_dev* dev)
 		expose_physicals = 0;
 	}
 
-	if(dev->dac_support != 0) {
-		if (!pci_set_dma_mask(dev->pdev, DMA_BIT_MASK(64)) &&
-			!pci_set_consistent_dma_mask(dev->pdev, DMA_BIT_MASK(64))) {
+	if (dev->dac_support) {
+		if (!pci_set_dma_mask(dev->pdev, DMA_BIT_MASK(64))) {
 			if (!dev->in_reset)
-				printk(KERN_INFO"%s%d: 64 Bit DAC enabled\n",
-					dev->name, dev->id);
-		} else if (!pci_set_dma_mask(dev->pdev, DMA_BIT_MASK(32)) &&
-			!pci_set_consistent_dma_mask(dev->pdev, DMA_BIT_MASK(32))) {
-			printk(KERN_INFO"%s%d: DMA mask set failed, 64 Bit DAC disabled\n",
-				dev->name, dev->id);
+				dev_info(&dev->pdev->dev, "64 Bit DAC enabled\n");
+		} else if (!pci_set_dma_mask(dev->pdev, DMA_BIT_MASK(32))) {
+			dev_info(&dev->pdev->dev, "DMA mask set failed, 64 Bit DAC disabled\n");
 			dev->dac_support = 0;
 		} else {
-			printk(KERN_WARNING"%s%d: No suitable DMA available.\n",
-				dev->name, dev->id);
+			dev_info(&dev->pdev->dev, "No suitable DMA available\n");
 			rcode = -ENOMEM;
 		}
 	}
@@ -2631,7 +2639,7 @@ static int aac_start_stop(struct scsi_cmnd *scsicmd)
 	struct scsi_device *sdev = scsicmd->device;
 	struct aac_dev *aac = (struct aac_dev *)sdev->host->hostdata;
 
-	if (!(aac->supplement_adapter_info.SupportedOptions2 &
+	if (!(aac->supplement_adapter_info.supported_options2 &
 	      AAC_OPTION_POWER_MANAGEMENT)) {
 		scsicmd->result = DID_OK << 16 | COMMAND_COMPLETE << 8 |
 				  SAM_STAT_GOOD;
@@ -3195,10 +3203,11 @@ static int query_disk(struct aac_dev *dev, void __user *arg)
 		return -EBUSY;
 	if (copy_from_user(&qd, arg, sizeof (struct aac_query_disk)))
 		return -EFAULT;
-	if (qd.cnum == -1)
+	if (qd.cnum == -1) {
+		if (qd.id < 0 || qd.id >= dev->maximum_num_containers)
+			return -EINVAL;
 		qd.cnum = qd.id;
-	else if ((qd.bus == -1) && (qd.id == -1) && (qd.lun == -1))
-	{
+	} else if ((qd.bus == -1) && (qd.id == -1) && (qd.lun == -1)) {
 		if (qd.cnum < 0 || qd.cnum >= dev->maximum_num_containers)
 			return -EINVAL;
 		qd.instance = dev->scsi_host_ptr->host_no;

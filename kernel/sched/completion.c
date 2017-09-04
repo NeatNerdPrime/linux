@@ -11,7 +11,8 @@
  * Waiting for completion is a typically sync point, but not an exclusion point.
  */
 
-#include <linux/sched.h>
+#include <linux/sched/signal.h>
+#include <linux/sched/debug.h>
 #include <linux/completion.h>
 
 /**
@@ -65,7 +66,7 @@ do_wait_for_common(struct completion *x,
 	if (!x->done) {
 		DECLARE_WAITQUEUE(wait, current);
 
-		__add_wait_queue_tail_exclusive(&x->wait, &wait);
+		__add_wait_queue_entry_tail_exclusive(&x->wait, &wait);
 		do {
 			if (signal_pending_state(state, current)) {
 				timeout = -ERESTARTSYS;

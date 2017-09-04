@@ -22,8 +22,11 @@
 
 #include <linux/errno.h>
 #include <linux/sched.h>
+#include <linux/sched/debug.h>
+#include <linux/sched/task.h>
+#include <linux/sched/task_stack.h>
 #include <linux/kernel.h>
-#include <linux/module.h>
+#include <linux/export.h>
 #include <linux/mm.h>
 #include <linux/stddef.h>
 #include <linux/unistd.h>
@@ -87,6 +90,7 @@ void arch_cpu_idle(void)
 }
 
 void (*pm_power_off) (void) = machine_power_off;
+EXPORT_SYMBOL(pm_power_off);
 
 /*
  * When a process does an "exec", machine state like FPU and debug
@@ -104,11 +108,6 @@ void show_regs(struct pt_regs *regs)
 	show_regs_print_info(KERN_DEFAULT);
 	/* __PHX__ cleanup this mess */
 	show_registers(regs);
-}
-
-unsigned long thread_saved_pc(struct task_struct *t)
-{
-	return (unsigned long)user_regs(t->stack)->pc;
 }
 
 void release_thread(struct task_struct *dead_task)
@@ -162,8 +161,6 @@ copy_thread(unsigned long clone_flags, unsigned long usp,
 	unsigned long top_of_kernel_stack;
 
 	top_of_kernel_stack = sp;
-
-	p->set_child_tid = p->clear_child_tid = NULL;
 
 	/* Locate userspace context on stack... */
 	sp -= STACK_FRAME_OVERHEAD;	/* redzone */

@@ -125,6 +125,13 @@ struct btrfs_inode {
 	u64 delalloc_bytes;
 
 	/*
+	 * Total number of bytes pending delalloc that fall within a file
+	 * range that is either a hole or beyond EOF (and no prealloc extent
+	 * exists in the range). This is always <= delalloc_bytes.
+	 */
+	u64 new_delalloc_bytes;
+
+	/*
 	 * total number of bytes pending defrag, used by stat to check whether
 	 * it needs COW.
 	 */
@@ -237,20 +244,20 @@ static inline u64 btrfs_ino(struct btrfs_inode *inode)
 	return ino;
 }
 
-static inline void btrfs_i_size_write(struct inode *inode, u64 size)
+static inline void btrfs_i_size_write(struct btrfs_inode *inode, u64 size)
 {
-	i_size_write(inode, size);
-	BTRFS_I(inode)->disk_i_size = size;
+	i_size_write(&inode->vfs_inode, size);
+	inode->disk_i_size = size;
 }
 
-static inline bool btrfs_is_free_space_inode(struct inode *inode)
+static inline bool btrfs_is_free_space_inode(struct btrfs_inode *inode)
 {
-	struct btrfs_root *root = BTRFS_I(inode)->root;
+	struct btrfs_root *root = inode->root;
 
 	if (root == root->fs_info->tree_root &&
-	    btrfs_ino(BTRFS_I(inode)) != BTRFS_BTREE_INODE_OBJECTID)
+	    btrfs_ino(inode) != BTRFS_BTREE_INODE_OBJECTID)
 		return true;
-	if (BTRFS_I(inode)->location.objectid == BTRFS_FREE_INO_OBJECTID)
+	if (inode->location.objectid == BTRFS_FREE_INO_OBJECTID)
 		return true;
 	return false;
 }
@@ -303,7 +310,8 @@ struct btrfs_dio_private {
 	 * The original bio may be split to several sub-bios, this is
 	 * done during endio of sub-bios
 	 */
-	int (*subio_endio)(struct inode *, struct btrfs_io_bio *, int);
+	blk_status_t (*subio_endio)(struct inode *, struct btrfs_io_bio *,
+			blk_status_t);
 };
 
 /*
@@ -311,34 +319,33 @@ struct btrfs_dio_private {
  * to grab i_mutex. It is used to avoid the endless truncate due to
  * nonlocked dio read.
  */
-static inline void btrfs_inode_block_unlocked_dio(struct inode *inode)
+static inline void btrfs_inode_block_unlocked_dio(struct btrfs_inode *inode)
 {
-	set_bit(BTRFS_INODE_READDIO_NEED_LOCK, &BTRFS_I(inode)->runtime_flags);
+	set_bit(BTRFS_INODE_READDIO_NEED_LOCK, &inode->runtime_flags);
 	smp_mb();
 }
 
-static inline void btrfs_inode_resume_unlocked_dio(struct inode *inode)
+static inline void btrfs_inode_resume_unlocked_dio(struct btrfs_inode *inode)
 {
 	smp_mb__before_atomic();
-	clear_bit(BTRFS_INODE_READDIO_NEED_LOCK,
-		  &BTRFS_I(inode)->runtime_flags);
+	clear_bit(BTRFS_INODE_READDIO_NEED_LOCK, &inode->runtime_flags);
 }
 
-static inline void btrfs_print_data_csum_error(struct inode *inode,
+static inline void btrfs_print_data_csum_error(struct btrfs_inode *inode,
 		u64 logical_start, u32 csum, u32 csum_expected, int mirror_num)
 {
-	struct btrfs_root *root = BTRFS_I(inode)->root;
+	struct btrfs_root *root = inode->root;
 
 	/* Output minus objectid, which is more meaningful */
 	if (root->objectid >= BTRFS_LAST_FREE_OBJECTID)
 		btrfs_warn_rl(root->fs_info,
 	"csum failed root %lld ino %lld off %llu csum 0x%08x expected csum 0x%08x mirror %d",
-			root->objectid, btrfs_ino(BTRFS_I(inode)),
+			root->objectid, btrfs_ino(inode),
 			logical_start, csum, csum_expected, mirror_num);
 	else
 		btrfs_warn_rl(root->fs_info,
 	"csum failed root %llu ino %llu off %llu csum 0x%08x expected csum 0x%08x mirror %d",
-			root->objectid, btrfs_ino(BTRFS_I(inode)),
+			root->objectid, btrfs_ino(inode),
 			logical_start, csum, csum_expected, mirror_num);
 }
 

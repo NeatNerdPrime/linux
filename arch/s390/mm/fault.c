@@ -12,6 +12,7 @@
 #include <linux/perf_event.h>
 #include <linux/signal.h>
 #include <linux/sched.h>
+#include <linux/sched/debug.h>
 #include <linux/kernel.h>
 #include <linux/errno.h>
 #include <linux/string.h>
@@ -129,7 +130,7 @@ static int bad_address(void *p)
 
 static void dump_pagetable(unsigned long asce, unsigned long address)
 {
-	unsigned long *table = __va(asce & PAGE_MASK);
+	unsigned long *table = __va(asce & _ASCE_ORIGIN);
 
 	pr_alert("AS:%016lx ", asce);
 	switch (asce & _ASCE_TYPE_MASK) {

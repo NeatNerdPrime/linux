@@ -242,6 +242,7 @@ static int alloc_command_queues(struct cpt_vf *cptvf,
 			if (!curr->head) {
 				dev_err(&pdev->dev, "Command Q (%d) chunk (%d) allocation failed\n",
 					i, queue->nchunks);
+				kfree(curr);
 				goto cmd_qfail;
 			}
 
@@ -524,7 +525,7 @@ static irqreturn_t cptvf_misc_intr_handler(int irq, void *cptvf_irq)
 	intr = cptvf_read_vf_misc_intr_status(cptvf);
 	/*Check for MISC interrupt types*/
 	if (likely(intr & CPT_VF_INTR_MBOX_MASK)) {
-		dev_err(&pdev->dev, "Mailbox interrupt 0x%llx on CPT VF %d\n",
+		dev_dbg(&pdev->dev, "Mailbox interrupt 0x%llx on CPT VF %d\n",
 			intr, cptvf->vfid);
 		cptvf_handle_mbox_intr(cptvf);
 		cptvf_clear_mbox_intr(cptvf);
@@ -815,8 +816,10 @@ static void cptvf_remove(struct pci_dev *pdev)
 {
 	struct cpt_vf *cptvf = pci_get_drvdata(pdev);
 
-	if (!cptvf)
+	if (!cptvf) {
 		dev_err(&pdev->dev, "Invalid CPT-VF device\n");
+		return;
+	}
 
 	/* Convey DOWN to PF */
 	if (cptvf_send_vf_down(cptvf)) {

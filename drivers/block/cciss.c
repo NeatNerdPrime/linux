@@ -348,7 +348,7 @@ static void cciss_unmap_sg_chain_block(ctlr_info_t *h, CommandList_struct *c)
 	pci_unmap_single(h->pdev, temp64.val, chain_sg->Len, PCI_DMA_TODEVICE);
 }
 
-static void cciss_map_sg_chain_block(ctlr_info_t *h, CommandList_struct *c,
+static int cciss_map_sg_chain_block(ctlr_info_t *h, CommandList_struct *c,
 	SGDescriptor_struct *chain_block, int len)
 {
 	SGDescriptor_struct *chain_sg;
@@ -359,8 +359,16 @@ static void cciss_map_sg_chain_block(ctlr_info_t *h, CommandList_struct *c,
 	chain_sg->Len = len;
 	temp64.val = pci_map_single(h->pdev, chain_block, len,
 				PCI_DMA_TODEVICE);
+	if (dma_mapping_error(&h->pdev->dev, temp64.val)) {
+		dev_warn(&h->pdev->dev,
+			"%s: error mapping chain block for DMA\n",
+			__func__);
+		return -1;
+	}
 	chain_sg->Addr.lower = temp64.val32.lower;
 	chain_sg->Addr.upper = temp64.val32.upper;
+
+	return 0;
 }
 
 #include "cciss_scsi.c"		/* For SCSI tape support */
@@ -1856,8 +1864,8 @@ static void cciss_softirq_done(struct request *rq)
 	/* set the residual count for pc requests */
 	if (blk_rq_is_passthrough(rq))
 		scsi_req(rq)->resid_len = c->err_info->ResidualCnt;
-
-	blk_end_request_all(rq, (rq->errors == 0) ? 0 : -EIO);
+	blk_end_request_all(rq, scsi_req(rq)->result ?
+			BLK_STS_IOERR : BLK_STS_OK);
 
 	spin_lock_irqsave(&h->lock, flags);
 	cmd_free(h, c);
@@ -1936,6 +1944,13 @@ static void cciss_get_serial_no(ctlr_info_t *h, int logvol,
 	return;
 }
 
+static void cciss_initialize_rq(struct request *rq)
+{
+	struct scsi_request *sreq = blk_mq_rq_to_pdu(rq);
+
+	scsi_req_init(sreq);
+}
+
 /*
  * cciss_add_disk sets up the block device queue for a logical drive
  */
@@ -1948,7 +1963,9 @@ static int cciss_add_disk(ctlr_info_t *h, struct gendisk *disk,
 
 	disk->queue->cmd_size = sizeof(struct scsi_request);
 	disk->queue->request_fn = do_cciss_request;
+	disk->queue->initialize_rq_fn = cciss_initialize_rq;
 	disk->queue->queue_lock = &h->lock;
+	queue_flag_set_unlocked(QUEUE_FLAG_SCSI_PASSTHROUGH, disk->queue);
 	if (blk_init_allocated_queue(disk->queue) < 0)
 		goto cleanup_queue;
 
@@ -3132,18 +3149,19 @@ static inline void complete_command(ctlr_info_t *h, CommandList_struct *cmd,
 {
 	int retry_cmd = 0;
 	struct request *rq = cmd->rq;
+	struct scsi_request *sreq = scsi_req(rq);
 
-	rq->errors = 0;
+	sreq->result = 0;
 
 	if (timeout)
-		rq->errors = make_status_bytes(0, 0, 0, DRIVER_TIMEOUT);
+		sreq->result = make_status_bytes(0, 0, 0, DRIVER_TIMEOUT);
 
 	if (cmd->err_info->CommandStatus == 0)	/* no error has occurred */
 		goto after_error_processing;
 
 	switch (cmd->err_info->CommandStatus) {
 	case CMD_TARGET_STATUS:
-		rq->errors = evaluate_target_status(h, cmd, &retry_cmd);
+		sreq->result = evaluate_target_status(h, cmd, &retry_cmd);
 		break;
 	case CMD_DATA_UNDERRUN:
 		if (!blk_rq_is_passthrough(cmd->rq)) {
@@ -3161,7 +3179,7 @@ static inline void complete_command(ctlr_info_t *h, CommandList_struct *cmd,
 	case CMD_INVALID:
 		dev_warn(&h->pdev->dev, "cciss: cmd %p is "
 		       "reported invalid\n", cmd);
-		rq->errors = make_status_bytes(SAM_STAT_GOOD,
+		sreq->result = make_status_bytes(SAM_STAT_GOOD,
 			cmd->err_info->CommandStatus, DRIVER_OK,
 			blk_rq_is_passthrough(cmd->rq) ?
 				DID_PASSTHROUGH : DID_ERROR);
@@ -3169,7 +3187,7 @@ static inline void complete_command(ctlr_info_t *h, CommandList_struct *cmd,
 	case CMD_PROTOCOL_ERR:
 		dev_warn(&h->pdev->dev, "cciss: cmd %p has "
 		       "protocol error\n", cmd);
-		rq->errors = make_status_bytes(SAM_STAT_GOOD,
+		sreq->result = make_status_bytes(SAM_STAT_GOOD,
 			cmd->err_info->CommandStatus, DRIVER_OK,
 			blk_rq_is_passthrough(cmd->rq) ?
 				DID_PASSTHROUGH : DID_ERROR);
@@ -3177,7 +3195,7 @@ static inline void complete_command(ctlr_info_t *h, CommandList_struct *cmd,
 	case CMD_HARDWARE_ERR:
 		dev_warn(&h->pdev->dev, "cciss: cmd %p had "
 		       " hardware error\n", cmd);
-		rq->errors = make_status_bytes(SAM_STAT_GOOD,
+		sreq->result = make_status_bytes(SAM_STAT_GOOD,
 			cmd->err_info->CommandStatus, DRIVER_OK,
 			blk_rq_is_passthrough(cmd->rq) ?
 				DID_PASSTHROUGH : DID_ERROR);
@@ -3185,7 +3203,7 @@ static inline void complete_command(ctlr_info_t *h, CommandList_struct *cmd,
 	case CMD_CONNECTION_LOST:
 		dev_warn(&h->pdev->dev, "cciss: cmd %p had "
 		       "connection lost\n", cmd);
-		rq->errors = make_status_bytes(SAM_STAT_GOOD,
+		sreq->result = make_status_bytes(SAM_STAT_GOOD,
 			cmd->err_info->CommandStatus, DRIVER_OK,
 			blk_rq_is_passthrough(cmd->rq) ?
 				DID_PASSTHROUGH : DID_ERROR);
@@ -3193,7 +3211,7 @@ static inline void complete_command(ctlr_info_t *h, CommandList_struct *cmd,
 	case CMD_ABORTED:
 		dev_warn(&h->pdev->dev, "cciss: cmd %p was "
 		       "aborted\n", cmd);
-		rq->errors = make_status_bytes(SAM_STAT_GOOD,
+		sreq->result = make_status_bytes(SAM_STAT_GOOD,
 			cmd->err_info->CommandStatus, DRIVER_OK,
 			blk_rq_is_passthrough(cmd->rq) ?
 				DID_PASSTHROUGH : DID_ABORT);
@@ -3201,7 +3219,7 @@ static inline void complete_command(ctlr_info_t *h, CommandList_struct *cmd,
 	case CMD_ABORT_FAILED:
 		dev_warn(&h->pdev->dev, "cciss: cmd %p reports "
 		       "abort failed\n", cmd);
-		rq->errors = make_status_bytes(SAM_STAT_GOOD,
+		sreq->result = make_status_bytes(SAM_STAT_GOOD,
 			cmd->err_info->CommandStatus, DRIVER_OK,
 			blk_rq_is_passthrough(cmd->rq) ?
 				DID_PASSTHROUGH : DID_ERROR);
@@ -3216,21 +3234,21 @@ static inline void complete_command(ctlr_info_t *h, CommandList_struct *cmd,
 		} else
 			dev_warn(&h->pdev->dev,
 				"%p retried too many times\n", cmd);
-		rq->errors = make_status_bytes(SAM_STAT_GOOD,
+		sreq->result = make_status_bytes(SAM_STAT_GOOD,
 			cmd->err_info->CommandStatus, DRIVER_OK,
 			blk_rq_is_passthrough(cmd->rq) ?
 				DID_PASSTHROUGH : DID_ABORT);
 		break;
 	case CMD_TIMEOUT:
 		dev_warn(&h->pdev->dev, "cmd %p timedout\n", cmd);
-		rq->errors = make_status_bytes(SAM_STAT_GOOD,
+		sreq->result = make_status_bytes(SAM_STAT_GOOD,
 			cmd->err_info->CommandStatus, DRIVER_OK,
 			blk_rq_is_passthrough(cmd->rq) ?
 				DID_PASSTHROUGH : DID_ERROR);
 		break;
 	case CMD_UNABORTABLE:
 		dev_warn(&h->pdev->dev, "cmd %p unabortable\n", cmd);
-		rq->errors = make_status_bytes(SAM_STAT_GOOD,
+		sreq->result = make_status_bytes(SAM_STAT_GOOD,
 			cmd->err_info->CommandStatus, DRIVER_OK,
 			blk_rq_is_passthrough(cmd->rq) ?
 				DID_PASSTHROUGH : DID_ERROR);
@@ -3239,7 +3257,7 @@ static inline void complete_command(ctlr_info_t *h, CommandList_struct *cmd,
 		dev_warn(&h->pdev->dev, "cmd %p returned "
 		       "unknown status %x\n", cmd,
 		       cmd->err_info->CommandStatus);
-		rq->errors = make_status_bytes(SAM_STAT_GOOD,
+		sreq->result = make_status_bytes(SAM_STAT_GOOD,
 			cmd->err_info->CommandStatus, DRIVER_OK,
 			blk_rq_is_passthrough(cmd->rq) ?
 				DID_PASSTHROUGH : DID_ERROR);
@@ -3369,15 +3387,31 @@ static void do_cciss_request(struct request_queue *q)
 		temp64.val = (__u64) pci_map_page(h->pdev, sg_page(&tmp_sg[i]),
 						tmp_sg[i].offset,
 						tmp_sg[i].length, dir);
+		if (dma_mapping_error(&h->pdev->dev, temp64.val)) {
+			dev_warn(&h->pdev->dev,
+				"%s: error mapping page for DMA\n", __func__);
+			scsi_req(creq)->result =
+				make_status_bytes(SAM_STAT_GOOD, 0, DRIVER_OK,
+						  DID_SOFT_ERROR);
+			cmd_free(h, c);
+			return;
+		}
 		curr_sg[sg_index].Addr.lower = temp64.val32.lower;
 		curr_sg[sg_index].Addr.upper = temp64.val32.upper;
 		curr_sg[sg_index].Ext = 0;  /* we are not chaining */
 		++sg_index;
 	}
-	if (chained)
-		cciss_map_sg_chain_block(h, c, h->cmd_sg_list[c->cmdindex],
+	if (chained) {
+		if (cciss_map_sg_chain_block(h, c, h->cmd_sg_list[c->cmdindex],
 			(seg - (h->max_cmd_sgentries - 1)) *
-				sizeof(SGDescriptor_struct));
+				sizeof(SGDescriptor_struct))) {
+			scsi_req(creq)->result =
+				make_status_bytes(SAM_STAT_GOOD, 0, DRIVER_OK,
+						  DID_SOFT_ERROR);
+			cmd_free(h, c);
+			return;
+		}
+	}
 
 	/* track how many SG entries we are using */
 	if (seg > h->maxSG)

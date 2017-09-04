@@ -60,7 +60,7 @@ render_state_get_rodata(const struct intel_engine_cs *engine)
  * this is sufficient as the null state generator makes the final batch
  * with two passes to build command and state separately. At this point
  * the size of both are known and it compacts them by relocating the state
- * right after the commands taking care of aligment so we should sufficient
+ * right after the commands taking care of alignment so we should sufficient
  * space below them for adding new commands.
  */
 #define OUT_BATCH(batch, i, val)				\
@@ -241,6 +241,10 @@ int i915_gem_render_state_emit(struct drm_i915_gem_request *req)
 		if (ret)
 			goto err_unpin;
 	}
+
+	ret = req->engine->emit_flush(req, EMIT_INVALIDATE);
+	if (ret)
+		goto err_unpin;
 
 	ret = req->engine->emit_bb_start(req,
 					 so->batch_offset, so->batch_size,

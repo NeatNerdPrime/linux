@@ -63,7 +63,6 @@ struct tm6000_IR {
 	u8			wait:1;
 	u8			pwled:2;
 	u8			submit_urb:1;
-	u16			key_addr;
 	struct urb		*int_urb;
 
 	/* IR device properties */
@@ -321,9 +320,6 @@ static int tm6000_ir_change_protocol(struct rc_dev *rc, u64 *rc_type)
 
 	dprintk(2, "%s\n",__func__);
 
-	if ((rc->rc_map.scan) && (*rc_type == RC_BIT_NEC))
-		ir->key_addr = ((rc->rc_map.scan[0].scancode >> 8) & 0xffff);
-
 	ir->rc_type = *rc_type;
 
 	tm6000_ir_config(ir);
@@ -438,7 +434,7 @@ int tm6000_ir_init(struct tm6000_core *dev)
 
 	/* input setup */
 	rc->allowed_protocols = RC_BIT_RC5 | RC_BIT_NEC;
-	/* Neded, in order to support NEC remotes with 24 or 32 bits */
+	/* Needed, in order to support NEC remotes with 24 or 32 bits */
 	rc->scancode_mask = 0xffff;
 	rc->priv = ir;
 	rc->change_protocol = tm6000_ir_change_protocol;
